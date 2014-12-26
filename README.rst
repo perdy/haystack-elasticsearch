@@ -1,0 +1,23 @@
+======================
+Haystack-ElasticSearch
+======================
+
+Haystack-ElasticSearch is a Django application that adds some specific features from ElasticSearch to django-haystack such as a mapping based on index/type hierarchy, each Django class is represented by a ElasticSearch type.
+
+Quick start
+===========
+
+#. Install this package using pip::
+
+    pip install haystack-elasticsearch
+
+
+#. Add *haystack-elasticsearch* to your **INSTALLED_APPS** settings like this::
+
+    INSTALLED_APPS = (
+        ...
+        'ebury_audit',
+    )
+
+#. Change your engine in haystack settings to *haystack_elasticsearch.backends.ElasticsearchSearchBackend*.
+#. Replace *haystack fields* for *haystack_elasticsearch fields* in your indexes.
