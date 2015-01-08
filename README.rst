@@ -2,6 +2,10 @@
 Haystack-ElasticSearch
 ======================
 
+:Version: 0.1.0
+:Status: beta
+:Author: José Antonio Perdiguero López
+
 Haystack-ElasticSearch is a Django application that adds some specific features from ElasticSearch to django-haystack such as a mapping based on index/type hierarchy, each Django class is represented by a ElasticSearch type.
 
 Quick start
