@@ -1,58 +1,69 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-import os
 import sys
+
+from setuptools import setup
+from setuptools.command.test import test as TestCommand
 
 import haystack_elasticsearch
 
-try:
-    from setuptools import setup
-except ImportError:
-    from distutils.core import setup
+with open('requirements.txt', 'r') as f:
+    requires = f.read().splitlines()
 
-version = haystack_elasticsearch.__version__
 
-if sys.argv[-1] == 'publish':
-    os.system('python setup.py sdist upload')
-    print("You probably want to also tag the version now:")
-    print("  git tag -a %s -m 'version %s'" % (version, version))
-    print("  git push --tags")
-    sys.exit()
+class Tox(TestCommand):
+    user_options = [('tox-args=', 'a', "Arguments to pass to tox")]
 
-readme = open('README.rst').read()
-history = open('HISTORY.rst').read().replace('.. :changelog:', '')
+    def initialize_options(self):
+        TestCommand.initialize_options(self)
+        self.tox_args = ''
+
+    def finalize_options(self):
+        TestCommand.finalize_options(self)
+        self.test_args = []
+        self.test_suite = True
+
+    def run_tests(self):
+        import tox
+        import shlex
+        errno = tox.cmdline(args=shlex.split(self.tox_args))
+        sys.exit(errno)
+
 
 setup(
-    name='ebury-haystack_elasticsearch',
-    version=version,
-    description="""Configurable indexing and other extras for Haystack (with ElasticSearch biases).""",
-    long_description=readme + '\n\n' + history,
-    author='Ben Lopatin',
-    author_email='ben@wellfire.co',
-    url='https://github.com/bennylope/haystack_elasticsearch',
+    name='haystack-elasticsearch',
+    version=haystack_elasticsearch.__version__,
+    description=haystack_elasticsearch.__description__,
+    long_description='\n'.join([open('README.rst').read(), open('CHANGELOG').read()]),
+    author=haystack_elasticsearch.__author__,
+    author_email=haystack_elasticsearch.__email__,
+    url=haystack_elasticsearch.__url__,
     packages=[
         'haystack_elasticsearch',
     ],
     include_package_data=True,
     install_requires=[
         'Django>=1.4',
-        'django-haystack>=2.0.0',
+        'django-haystack>=2.3.0',
         'elasticsearch>=1.2.0',
     ],
-    license="BSD",
+    license=haystack_elasticsearch.__license__,
     zip_safe=False,
     keywords='haystack_elasticsearch',
     classifiers=[
         'Development Status :: 4 - Beta',
         'Framework :: Django',
         'Intended Audience :: Developers',
-        'License :: OSI Approved :: BSD License',
+        'License :: OSI Approved :: GNU General Public License v3 (GPLv3)',
         'Natural Language :: English',
-        "Programming Language :: Python :: 2",
+        'Programming Language :: Python :: 2',
         'Programming Language :: Python :: 2.6',
         'Programming Language :: Python :: 2.7',
         'Programming Language :: Python :: 3',
         'Programming Language :: Python :: 3.3',
+        'Topic :: Internet :: WWW/HTTP :: Indexing/Search',
+        'Topic :: Software Development :: Libraries :: Python Modules',
     ],
 )
+

@@ -1,5 +1,6 @@
 include LICENSE
 include CHANGELOG
 include README.rst
+include CONTRIBUTORS.rst
 include requirements.txt
 recursive-include haystack_elasticsearch
