@@ -16,11 +16,11 @@ Quick start
     pip install haystack-elasticsearch
 
 
-#. Add *haystack-elasticsearch* to your **INSTALLED_APPS** settings like this::
+#. Add *haystack_elasticsearch* to your **INSTALLED_APPS** settings like this::
 
     INSTALLED_APPS = (
         ...
-        'ebury_audit',
+        'haystack_elasticsearch',
     )
 
 #. Change your engine in haystack settings to *haystack_elasticsearch.backends.ElasticsearchSearchBackend*.
