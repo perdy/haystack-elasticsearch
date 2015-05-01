@@ -1,13 +1,12 @@
 import copy
-import importlib
 import inspect
-import warnings
 
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 from django.utils.datastructures import SortedDict
-from django.utils.module_loading import module_has_submodule
 from haystack.exceptions import SearchFieldError, NotHandled
+from haystack_elasticsearch import utils
+from haystack_elasticsearch.decorators import AutoBuild
 
 
 class ClassIndex(object):
@@ -20,18 +19,28 @@ class ClassIndex(object):
         self._facet_fieldnames = {}
 
     def reset(self):
+        """Resets the index.
+        """
         self.fields = SortedDict()
         self._built = False
         self._fieldnames = {}
         self._facet_fieldnames = {}
 
     def build(self):
-        self.reset()
-        self.collect_fields()
+        """Build a Class Index.
+        """
+        if not self._built:
+            self.reset()
+            self.collect_fields()
 
-        self._built = True
+            self._built = True
 
     def collect_fields(self):
+        """Collect indexes from all your applications.
+
+        :return: Indexes.
+        :rtype: list
+        """
         for fieldname, field_object in self.index.fields.items():
             if field_object.document is True:
                 if field_object.index_fieldname != self.document_field:
@@ -91,22 +100,35 @@ class ClassIndex(object):
                     self.fields[field_object.index_fieldname].null = True
 
     def get_model(self):
+        """Gets the model represented by this index.
+
+        :return: Model.
+        :rtype: object
+        """
         return self.index.get_model()
 
+    @AutoBuild
     def get_index_fieldname(self, field):
-        if not self._built:
-            self.build()
+        """Given a field returns his name.
 
+        :param field: Field.
+        :type field: Field
+        :return: Field name.
+        :rtype: str
+        """
         return self._fieldnames.get(field) or field
 
+    @AutoBuild
     def get_facet_fieldname(self, field):
-        if not self._built:
-            self.build()
+        """Given a facet field returns his name.
 
-        for fieldname, field_object in self.fields.items():
-            if fieldname != field:
-                continue
-
+        :param field: Facet Field.
+        :type field: FacetField
+        :return: Field name.
+        :rtype: str
+        """
+        if field in self.fields:
+            field_object = self.fields[field]
             if hasattr(field_object, 'facet_for'):
                 if field_object.facet_for:
                     return field_object.facet_for
@@ -119,30 +141,28 @@ class ClassIndex(object):
 
 
 class UnifiedIndex(object):
-    # Used to collect all the indexes into a cohesive whole.
     def __init__(self, excluded_indexes=None):
+        """Used to collect all indexes into a cohesive whole.
+
+        :param excluded_indexes: List of excluded indexes.
+        :type excluded_indexes: list
+        """
         self.indexes = {}
         self._built = False
         self.excluded_indexes = excluded_indexes or []
         self.excluded_indexes_ids = {}
 
     def collect_indexes(self):
+        """Collect indexes from all your applications.
+
+        :return: Indexes.
+        :rtype: list
+        """
+
         indexes = []
 
         for app in settings.INSTALLED_APPS:
-            try:
-                mod = importlib.import_module(app)
-            except ImportError:
-                warnings.warn('Installed app %s is not an importable Python module and will be ignored' % app)
-                continue
-
-            try:
-                search_index_module = importlib.import_module("%s.search_indexes" % app)
-            except ImportError:
-                if module_has_submodule(mod, 'search_indexes'):
-                    raise
-
-                continue
+            search_index_module = utils.import_search_indexes(app)
 
             for item_name, item in inspect.getmembers(search_index_module, inspect.isclass):
                 if getattr(item, 'haystack_use_for_indexing', False) and getattr(item, 'get_model', None):
@@ -151,17 +171,23 @@ class UnifiedIndex(object):
 
                     if class_path in self.excluded_indexes or self.excluded_indexes_ids.get(item_name) == id(item):
                         self.excluded_indexes_ids[str(item_name)] = id(item)
-                        continue
-
-                    indexes.append(ClassIndex(item()))
+                    else:
+                        indexes.append(ClassIndex(item()))
 
         return indexes
 
     def reset(self):
+        """Resets the index.
+        """
         self.indexes = {}
         self._built = False
 
     def build(self, indexes=None):
+        """Build an Unified Index.
+
+        :param indexes: List of indexes, will be collected automatically if this parameter is not used.
+        :type indexes: list
+        """
         self.reset()
 
         if indexes is None:
@@ -184,23 +210,45 @@ class UnifiedIndex(object):
 
         self._built = True
 
+    @AutoBuild
     def get_indexed_models(self):
-        if not self._built:
-            self.build()
+        """Gets all models that are currently indexed.
 
-        return list(self.indexes.keys())
+        :return: Indexed models.
+        :rtype: list
+        """
+        return self.indexes.keys()
 
+    @AutoBuild
     def get_index(self, model_klass):
-        if not self._built:
-            self.build()
+        """Gets the index associated to a model.
 
-        if model_klass not in self.indexes:
+        :param model_klass: Model.
+        :type model_klass: object
+        :return: Index.
+        :rtype: ClassIndex
+        """
+        try:
+            return self.indexes[model_klass].index
+        except KeyError:
             raise NotHandled('The model %s is not registered' % model_klass.__class__)
 
-        return self.indexes[model_klass].index
+    @AutoBuild
+    def get_index_fieldname(self, field):
+        """Gets all field names for a field. Each index can contain this field with a different field name.
 
+        :param field: Field to look up.
+        :type field: Field
+        :return: Field name for each index.
+        :rtype: dict
+        """
+        return {index: index.get_index_fieldname(field) for index in self.indexes.values()}
+
+    @AutoBuild
     def all_searchfields(self):
-        if not self._built:
-            self.build()
+        """Gets a dict that associates each index with all his fields.
 
+        :return: All fields.
+        :rtype: dict
+        """
         return {index.index: index.fields for index in self.indexes.itervalues()}

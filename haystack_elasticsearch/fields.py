@@ -1,3 +1,4 @@
+from haystack.exceptions import SearchFieldError
 from haystack.fields import (CharField as BaseCharField,
                              LocationField as BaseLocationField,
                              NgramField as BaseNgramField,
@@ -20,7 +21,11 @@ class ConfigurableFieldMixin(object):
         super(ConfigurableFieldMixin, self).__init__(**kwargs)
 
 
-class ElasticCharFieldMixin(ConfigurableFieldMixin):
+class ElasticField(ConfigurableFieldMixin):
+    pass
+
+
+class ElasticCharField(ElasticField):
     """
     Field that has analyzer attribute.
     """
@@ -28,58 +33,58 @@ class ElasticCharFieldMixin(ConfigurableFieldMixin):
         self.analyzer = analyzer
         self.term_vector = term_vector
 
-        super(ElasticCharFieldMixin, self).__init__(**kwargs)
+        super(ElasticCharField, self).__init__(**kwargs)
 
 
-class CharField(ElasticCharFieldMixin, BaseCharField):
+class CharField(ElasticCharField, BaseCharField):
     pass
 
 
-class LocationField(ConfigurableFieldMixin, BaseLocationField):
+class LocationField(ElasticField, BaseLocationField):
     pass
 
 
-class NgramField(ConfigurableFieldMixin, BaseNgramField):
+class NgramField(ElasticField, BaseNgramField):
     pass
 
 
-class EdgeNgramField(ConfigurableFieldMixin, BaseEdgeNgramField):
+class EdgeNgramField(ElasticField, BaseEdgeNgramField):
     pass
 
 
-class IntegerField(ConfigurableFieldMixin, BaseIntegerField):
+class IntegerField(ElasticField, BaseIntegerField):
     pass
 
 
-class FloatField(ConfigurableFieldMixin, BaseFloatField):
+class FloatField(ElasticField, BaseFloatField):
     pass
 
 
-class DecimalField(ConfigurableFieldMixin, BaseDecimalField):
+class DecimalField(ElasticField, BaseDecimalField):
     pass
 
 
-class BooleanField(ConfigurableFieldMixin, BaseBooleanField):
+class BooleanField(ElasticField, BaseBooleanField):
     pass
 
 
-class DateField(ConfigurableFieldMixin, BaseDateField):
+class DateField(ElasticField, BaseDateField):
     pass
 
 
-class DateTimeField(ConfigurableFieldMixin, BaseDateTimeField):
+class DateTimeField(ElasticField, BaseDateTimeField):
     pass
 
 
-class MultiValueField(ConfigurableFieldMixin, BaseMultiValueField):
+class MultiValueField(ElasticField, BaseMultiValueField):
     pass
 
 
-class FacetField(ConfigurableFieldMixin, BaseFacetField):
+class FacetField(ElasticField, BaseFacetField):
     pass
 
 
-class BaseFacetCharField(ElasticCharFieldMixin, BaseFacetField):
+class BaseFacetCharField(ElasticCharField, BaseFacetField):
     pass
 
 

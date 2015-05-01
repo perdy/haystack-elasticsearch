@@ -1,17 +1,20 @@
+import json
 import warnings
 import datetime
 
 from django.conf import settings
 from django.db.models.loading import get_model
+from django.utils import six
 import haystack
 from haystack.backends import log_query
 from haystack.backends.elasticsearch_backend import (ElasticsearchSearchBackend as HaystackBackend,
                                                      ElasticsearchSearchEngine as HaystackEngine,
+                                                     ElasticsearchSearchQuery as HaystackQuery,
                                                      DEFAULT_FIELD_MAPPING,
                                                      FIELD_MAPPINGS)
-from haystack.constants import DJANGO_ID, ID, DEFAULT_OPERATOR
-from haystack.constants import DJANGO_CT
-from haystack.exceptions import MissingDependency
+from haystack.constants import DJANGO_ID, ID, DEFAULT_OPERATOR, DJANGO_CT
+from haystack.exceptions import MissingDependency, NotHandled
+from haystack.inputs import Exact, Raw, Clean, PythonData, BaseInput
 from haystack.models import SearchResult
 from haystack.utils import get_model_ct, get_identifier
 
@@ -49,12 +52,9 @@ class ElasticsearchSearchBackend(HaystackBackend):
             setattr(self, 'DEFAULT_ANALYZER', user_analyzer)
 
     def setup(self):
+        """Get the existing mapping & cache it. We'll compare it during the ``update`` and if it doesn't match,
+        we'll put the new mapping.
         """
-        Defers loading until needed.
-        """
-        # Get the existing mapping & cache it. We'll compare it
-        # during the ``update`` & if it doesn't match, we'll put the new
-        # mapping.
         try:
             self.existing_mapping = self.conn.indices.get_mapping(index=self.index_name)
         except NotFoundError:
@@ -81,6 +81,13 @@ class ElasticsearchSearchBackend(HaystackBackend):
         self.setup_complete = True
 
     def build_schema(self, indexes):
+        """Build Elasticsearch schema.
+
+        :param indexes: Dictionary of model -> index.
+        :type indexes: dict
+        :return: Schema.
+        :rtype: dict
+        """
         schema = {}
 
         for model, index in indexes.iteritems():
@@ -98,9 +105,13 @@ class ElasticsearchSearchBackend(HaystackBackend):
 
                 # Do this last to override `text` fields.
                 if field_mapping['type'] == 'string':
-                    if field_class.indexed is False or hasattr(field_class, 'facet_for'):
+                    if field_class.indexed is False or hasattr(field_class, 'facet_for') or getattr(field_class, 'is_multivalued', False):
                         field_mapping['index'] = 'not_analyzed'
-                        del field_mapping['analyzer']
+                        try:
+                            del field_mapping['analyzer']
+                            del field_mapping['term_vector']
+                        except:
+                            pass
 
                     elif field_class.field_type not in ('ngram', 'edge_ngram'):
 
@@ -126,6 +137,15 @@ class ElasticsearchSearchBackend(HaystackBackend):
         return schema
 
     def update(self, index, iterable, commit=True):
+        """Update an index with a collection.
+
+        :param index: Index to be updated.
+        :type index: Index
+        :param iterable: Objects to update the index.
+        :type iterable: iterable
+        :param commit: Commit changes.
+        :type commit: bool
+        """
         if not self.setup_complete:
             try:
                 self.setup()
@@ -163,17 +183,27 @@ class ElasticsearchSearchBackend(HaystackBackend):
                     }
                 })
 
-        bulk_index(self.conn, prepped_docs, index=self.index_name, doc_type=get_model_ct(index.get_model()))
+        doc_type = get_model_ct(index.get_model())
+        bulk_index(self.conn, prepped_docs, index=self.index_name, doc_type=doc_type)
 
         if commit:
             self.conn.indices.refresh(index=self.index_name)
 
     def remove(self, obj_or_string, commit=True):
+        """Remove an object from an index.
+
+        :param obj_or_string: Object to be removed.
+        :param commit: Commit changes.
+        :type commit: bool
+        """
         doc_id = get_identifier(obj_or_string)
         try:
             doc_type = get_model_ct(obj_or_string)
         except:
-            doc_type = ''
+            try:
+                doc_type = obj_or_string.rsplit('.', 1)[0]
+            except:
+                doc_type = '*'
 
         if not self.setup_complete:
             try:
@@ -197,14 +227,19 @@ class ElasticsearchSearchBackend(HaystackBackend):
             self.log.error("Failed to remove document '%s' from Elasticsearch: %s", doc_id, e)
 
     def clear(self, models=None, commit=True):
-        # We actually don't want to do this here, as mappings could be
-        # very different.
-        # if not self.setup_complete:
-        # self.setup()
+        """Clear an index.
+
+        :param models: Models to be cleared.
+        :type models: list
+        :param commit: Commit changes.
+        :type commit: bool
+        """
+
         if models is None:
             models = []
-
-        models_to_delete = ['{}:{}'.format(DJANGO_CT, get_model_ct(model)) for model in models]
+            doc_type = ''
+        else:
+            doc_type = ','.join([get_model_ct(model) for model in models])
 
         try:
             if not models:
@@ -214,14 +249,14 @@ class ElasticsearchSearchBackend(HaystackBackend):
             else:
                 # Delete by query in Elasticsearch asssumes you're dealing with
                 # a ``query`` root object. :/
-                query = {'query': {'query_string': {'query': " OR ".join(models_to_delete)}}}
-                self.conn.delete_by_query(index=self.index_name, doc_type='', body=query)
+                query = {'query': {'query_string': {'query': '*'}}}
+                self.conn.delete_by_query(index=self.index_name, doc_type=doc_type, body=query)
         except elasticsearch.TransportError as e:
             if not self.silently_fail:
                 raise
 
             if len(models):
-                self.log.error("Failed to clear Elasticsearch index of models '%s': %s", ','.join(models_to_delete), e)
+                self.log.error("Failed to clear Elasticsearch index of models '%s': %s", doc_type, e)
             else:
                 self.log.error("Failed to clear Elasticsearch index: %s", e)
 
@@ -232,6 +267,34 @@ class ElasticsearchSearchBackend(HaystackBackend):
                             within=None, dwithin=None, distance_point=None,
                             models=None, limit_to_registered_models=None,
                             result_class=None):
+        """Build all kwargs necessaries to perform the query.
+
+        :param query_string: Query string.
+        :type query_string: str
+        :param sort_by:
+        :param start_offset: If query is partially done, this parameters will represents where the slice begins.
+        :type start_offset: int
+        :param end_offset: If query is partially done, this parameters will represents where the slice ends.
+        :type end_offset: int
+        :param fields: Fields that will be searched for.
+        :type fields: str
+        :param highlight:
+        :param facets:
+        :param date_facets:
+        :param query_facets:
+        :param narrow_queries:
+        :param spelling_query:
+        :param within:
+        :param dwithin:
+        :param distance_point:
+        :param models: List of models over the query will be performed.
+        :type models: list
+        :param limit_to_registered_models:
+        :param result_class: Class used for search results.
+        :type result_class: object
+        :return: Search kwargs.
+        :rtype: dict
+        """
         if query_string == '*:*':
             kwargs = {
                 'query': {
@@ -264,7 +327,6 @@ class ElasticsearchSearchBackend(HaystackBackend):
 
         kwargs['models'] = model_choices
 
-        # so far, no filters
         filters = []
 
         if fields:
@@ -296,13 +358,6 @@ class ElasticsearchSearchBackend(HaystackBackend):
                 order_list.append(sort_kwargs)
 
             kwargs['sort'] = order_list
-
-        # From/size offsets don't seem to work right in Elasticsearch's DSL. :/
-        # if start_offset is not None:
-        # kwargs['from'] = start_offset
-
-        # if end_offset is not None:
-        # kwargs['size'] = end_offset - start_offset
 
         if highlight is True:
             kwargs['highlight'] = {
@@ -383,9 +438,6 @@ class ElasticsearchSearchBackend(HaystackBackend):
                     },
                 }
 
-        if len(model_choices) > 0:
-            filters.append({"terms": {DJANGO_CT: model_choices}})
-
         for q in narrow_queries:
             filters.append({
                 'fquery': {
@@ -441,25 +493,18 @@ class ElasticsearchSearchBackend(HaystackBackend):
 
         return kwargs
 
-    def _process_results(self, raw_results, highlight=False,
-                         result_class=None, distance_point=None,
-                         geo_sort=False):
-        from haystack import connections
+    def _process_results_facets_section(self, raw_results):
+        """Process facets section from raw results.
 
-        results = []
-        hits = raw_results.get('hits', {}).get('total', 0)
+        :param raw_results: Result returned from ElasticSearch API.
+        :type raw_results: dict
+        :return: Facets section.
+        :rtype: dict
+        """
+        # Initialize return value
         facets = {}
-        spelling_suggestion = None
 
-        if result_class is None:
-            result_class = SearchResult
-
-        if self.include_spelling and 'suggest' in raw_results:
-            raw_suggest = raw_results['suggest'].get('suggest')
-            if raw_suggest:
-                spelling_suggestion = ' '.join(
-                    [word['text'] if len(word['options']) == 0 else word['options'][0]['text'] for word in raw_suggest])
-
+        # Do processing
         if 'facets' in raw_results:
             facets = {
                 'fields': {},
@@ -480,46 +525,115 @@ class ElasticsearchSearchBackend(HaystackBackend):
                 elif facet_info.get('_type', 'terms') == 'query':
                     facets['queries'][facet_fieldname] = facet_info['count']
 
+        return facets
+
+    def _process_results_results_section(self, distance_point, geo_sort, raw_results, result_class):
+        """Process results section from raw results.
+
+        :param raw_results: Result returned from ElasticSearch API.
+        :type raw_results: dict
+        :return: Results section.
+        :rtype: dict
+        """
+        from haystack import connections
+        if distance_point and geo_sort:
+            from haystack.utils.geo import Distance
+
+        # Get result class
+        if result_class is None:
+            result_class = SearchResult
+
+        # Initialize return values
+        hits = raw_results.get('hits', {}).get('total', 0)
+        results = []
+
+        # Get unified index
         unified_index = connections[self.connection_alias].get_unified_index()
-        indexed_models = unified_index.get_indexed_models()
 
+        # Do processing
         for raw_result in raw_results.get('hits', {}).get('hits', []):
-            source = raw_result['_source']
-            app_label, model_name = source[DJANGO_CT].split('.')
-            additional_fields = {}
-            model = get_model(app_label, model_name)
+            try:
+                source = raw_result['_source']
+                app_label, model_name = source[DJANGO_CT].split('.')
+                additional_fields = {}
+                model = get_model(app_label, model_name)
+                index = unified_index.get_index(model)
 
-            if model and model in indexed_models:
-                for key, value in source.items():
-                    index = unified_index.get_index(model)
+                for key, value in [(k, v) for k, v in source.items() if k != DJANGO_CT and k != DJANGO_ID]:
                     string_key = str(key)
 
-                    if string_key in index.fields and hasattr(index.fields[string_key], 'convert'):
+                    try:
                         additional_fields[string_key] = index.fields[string_key].convert(value)
-                    else:
+                    except (KeyError, NameError):
                         additional_fields[string_key] = self._to_python(value)
 
-                del (additional_fields[DJANGO_CT])
-                del (additional_fields[DJANGO_ID])
-
-                if 'highlight' in raw_result:
+                try:
                     additional_fields['highlighted'] = raw_result['highlight']
+                except KeyError:
+                    pass
 
                 if distance_point:
                     additional_fields['_point_of_origin'] = distance_point
 
-                    if geo_sort and raw_result.get('sort'):
-                        from haystack.utils.geo import Distance
-
-                        additional_fields['_distance'] = Distance(km=float(raw_result['sort'][0]))
-                    else:
-                        additional_fields['_distance'] = None
+                    if geo_sort:
+                        try:
+                            additional_fields['_distance'] = Distance(km=float(raw_result['sort'][0]))
+                        except KeyError:
+                            additional_fields['_distance'] = None
 
                 result = result_class(app_label, model_name, source[DJANGO_ID], raw_result['_score'],
                                       **additional_fields)
                 results.append(result)
-            else:
+            except NotHandled:
                 hits -= 1
+            except KeyError:
+                hits -= 1
+                logger.warning("Hit has no source field")
+
+        return results, hits
+
+    def _process_results_suggest_section(self, raw_results):
+        """Process suggest section from raw results.
+
+        :param raw_results: Result returned from ElasticSearch API.
+        :type raw_results: dict
+        :return: Suggestion section.
+        :rtype: dict
+        """
+        # Initialize return value
+        spelling_suggestion = None
+
+        # Do processing
+        if self.include_spelling and 'suggest' in raw_results:
+            raw_suggest = raw_results['suggest'].get('suggest')
+            if raw_suggest:
+                spelling_suggestion = ' '.join(
+                    [word['text'] if len(word['options']) == 0 else word['options'][0]['text'] for word in raw_suggest])
+
+        return spelling_suggestion
+
+    def _process_results(self, raw_results, highlight=False, result_class=None, distance_point=None, geo_sort=False):
+        """Process results from a raw dictionary obtained in a query to Elasticsearch API
+
+        :param raw_results: Raw results.
+        :type raw_results: dict
+        :param highlight: Indicates if highlighted.
+        :type highlight: bool
+        :param result_class: Class used for a result value.
+        :type result_class: object
+        :param distance_point: Initial distance.
+        :type distance_point: object
+        :param geo_sort: Indicates if sorted using geo.
+        :type geo_sort: bool
+        :return: Processed results.
+        :rtype: dict
+        """
+
+        spelling_suggestion = self._process_results_suggest_section(raw_results)
+
+        facets = self._process_results_facets_section(raw_results)
+
+        results, hits = self._process_results_results_section(distance_point, geo_sort, raw_results, result_class)
 
         return {
             'results': results,
@@ -530,6 +644,14 @@ class ElasticsearchSearchBackend(HaystackBackend):
 
     @log_query
     def search(self, query_string, **kwargs):
+        """Do a search in Elasticsearch.
+
+        :param query_string: The string that will be used for querying.
+        :type query_string: str
+        :param kwargs: Search parameters.
+        :type kwargs: dict
+        :return: Search results.
+        """
         if len(query_string) == 0:
             return {
                 'results': [],
@@ -558,9 +680,7 @@ class ElasticsearchSearchBackend(HaystackBackend):
         doc_type = ','.join(models) if models else ''
 
         try:
-            raw_results = self.conn.search(body=search_kwargs,
-                                           index=self.index_name,
-                                           doc_type=doc_type)
+            raw_results = self.conn.search(body=search_kwargs, index=self.index_name, doc_type=doc_type, _source=True)
         except elasticsearch.TransportError as e:
             if not self.silently_fail:
                 raise
@@ -576,6 +696,24 @@ class ElasticsearchSearchBackend(HaystackBackend):
     def more_like_this(self, model_instance, additional_query_string=None,
                        start_offset=0, end_offset=None, models=None,
                        limit_to_registered_models=None, result_class=None, **kwargs):
+        """Do a 'more like this' search in Elasticsearch.
+
+        :param model_instance: Model that will be used as a base for 'more like this'.
+        :type model_instance: object
+        :param additional_query_string:
+        :param start_offset: If query is partially done, this parameters will represents where the slice begins.
+        :type start_offset: int
+        :param end_offset: If query is partially done, this parameters will represents where the slice ends.
+        :type end_offset: int
+        :param models: Models to be searched.
+        :type models: list
+        :param limit_to_registered_models:
+        :param result_class: Class used for a result value.
+        :type result_class: object
+        :param kwargs: Search parameters.
+        :type kwargs: dict
+        :return: Search results.
+        """
         from haystack import connections
 
         if not self.setup_complete:
@@ -610,6 +748,129 @@ class ElasticsearchSearchBackend(HaystackBackend):
         return self._process_results(raw_results, result_class=result_class)
 
 
+class ElasticsearchSearchQuery(HaystackQuery):
+    """
+    Provides a way to specify search parameters and lazily load results.
+
+    This implementation changes how Query fragment is constructed, applying changes related to multi-type.
+    """
+    def build_query_fragment(self, field, filter_type, value):
+        """Construct the query fragment based on the field that is been search for.
+
+        :param field: Field to search.
+        :type field: str
+        :param filter_type: Filter type (contains, gt, lt...)
+        :type filter_type: str
+        :param value: Value to search.
+        :type value: str
+        :return: Query fragment.
+        :rtype: str
+        """
+        from haystack import connections
+
+        if not hasattr(value, 'input_type_name'):
+            # Handle when we've got a ``ValuesListQuerySet``...
+            if hasattr(value, 'values_list'):
+                value = list(value)
+
+            if isinstance(value, six.string_types):
+                # It's not an ``InputType``. Assume ``Clean``.
+                value = Clean(value)
+            else:
+                value = PythonData(value)
+
+        # Prepare the query using the InputType.
+        prepared_value = value.prepare(self)
+
+        if not isinstance(prepared_value, (set, list, tuple)):
+            # Then convert whatever we get back to what elasticsearch wants if needed.
+            prepared_value = self.backend._from_python(prepared_value)
+
+        # 'content' is a special reserved word, much like 'pk' in
+        # Django's ORM layer. It indicates 'no special field'.
+        if field == 'content':
+            index_fieldnames = {}
+        else:
+            index_fieldnames = connections[self._using].get_unified_index().get_index_fieldname(field)
+
+        filter_types = {
+            'contains': u'%s',
+            'startswith': u'%s*',
+            'exact': u'%s',
+            'gt': u'{%s TO *}',
+            'gte': u'[%s TO *]',
+            'lt': u'{* TO %s}',
+            'lte': u'[* TO %s]',
+        }
+
+        if value.post_process is False:
+            query_frag = prepared_value
+        else:
+            if filter_type in ['contains', 'startswith']:
+                if value.input_type_name == 'exact':
+                    query_frag = prepared_value
+                else:
+                    # Iterate over terms & incorportate the converted form of each into the query.
+                    terms = []
+
+                    if isinstance(prepared_value, six.string_types):
+                        for possible_value in prepared_value.split(' '):
+                            term = filter_types[filter_type] % self.backend._from_python(possible_value)
+                            terms.append(u'"%s"' % term)
+                    elif isinstance(prepared_value, bool):
+                        term = filter_types[filter_type] % six.text_type(prepared_value).lower()
+                        terms.append(u'"%s"' % term)
+                    else:
+                        terms.append(filter_types[filter_type] % prepared_value)
+
+                    if len(terms) == 1:
+                        query_frag = terms[0]
+                    else:
+                        query_frag = u"(%s)" % " AND ".join(terms)
+            elif filter_type == 'in':
+                in_options = []
+
+                for possible_value in prepared_value:
+                    if isinstance(possible_value, six.string_types):
+                        in_options.append(u'"%s"' % self.backend._from_python(possible_value))
+                    elif isinstance(possible_value, bool):
+                        term = filter_types[filter_type] % six.text_type(possible_value).lower()
+                        in_options.append(u'"%s"' % term)
+                    else:
+                        in_options.append(u'%s' % possible_value)
+
+                query_frag = u"(%s)" % " OR ".join(in_options)
+            elif filter_type == 'range':
+                start = self.backend._from_python(prepared_value[0])
+                end = self.backend._from_python(prepared_value[1])
+                query_frag = u'[%s TO %s]' % (start, end)
+            elif filter_type == 'exact':
+                if value.input_type_name == 'exact':
+                    query_frag = prepared_value
+                else:
+                    prepared_value = Exact(prepared_value).prepare(self)
+                    query_frag = filter_types[filter_type] % prepared_value
+            else:
+                if value.input_type_name == 'exact':
+                    prepared_value = Exact(prepared_value).prepare(self)
+
+                query_frag = filter_types[filter_type] % prepared_value
+
+        if len(query_frag) and not isinstance(value, Raw):
+            if not query_frag.startswith('(') and not query_frag.endswith(')'):
+                query_frag = '(%s)' % str(query_frag)
+
+        field_names = set(index_fieldnames.values())
+        if field_names:
+            multiple_query_frag = ' OR '.join([u'%s:%s' % (field_name, query_frag) for field_name in field_names])
+            result = "(%s)" % multiple_query_frag
+        else:
+            result = query_frag
+
+        return result
+
+
 class ElasticsearchSearchEngine(HaystackEngine):
     backend = ElasticsearchSearchBackend
+    query = ElasticsearchSearchQuery
     unified_index = UnifiedIndex

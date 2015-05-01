@@ -3,4 +3,5 @@ include CHANGELOG
 include README.rst
 include CONTRIBUTORS.rst
 include requirements.txt
-recursive-include haystack_elasticsearch
+include requirements_test.txt
+recursive-include haystack_elasticsearch *
